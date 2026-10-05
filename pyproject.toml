@@ -26,6 +26,9 @@ classifiers = [
   "Programming Language :: Python :: 3.15",
   "Topic :: Software Development :: Libraries",
 ]
+dependencies = [
+  "aiohttp>=3.9",
+]
 urls."Bug Tracker" = "https://github.com/bdraco/aiocpanel/issues"
 urls.Changelog = "https://github.com/bdraco/aiocpanel/blob/main/CHANGELOG.md"
 urls.documentation = "https://aiocpanel.readthedocs.io"
@@ -33,8 +36,10 @@ urls.repository = "https://github.com/bdraco/aiocpanel"
 
 [dependency-groups]
 dev = [
+  "aiointercept>=0.1.12",
   "coverage",
   "pytest==9.*",
+  "pytest-asyncio>=1",
   "pytest-cov==7.*",
   "sybil[pytest]",
   "ty",
@@ -97,6 +102,7 @@ addopts = [
   "--cov-report=term",
   "--cov-report=xml",
 ]
+asyncio_mode = "auto"
 minversion = "9.0"
 pythonpath = [ "src" ]
 
