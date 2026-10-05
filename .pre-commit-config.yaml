@@ -6,6 +6,8 @@ default_stages: [pre-commit]
 ci:
   autofix_commit_msg: "chore(pre-commit.ci): auto fixes"
   autoupdate_commit_msg: "chore(pre-commit.ci): pre-commit autoupdate"
+  # Needs uv, which the pre-commit.ci runners lack; CI runs it via prek.
+  skip: [local-ty]
 
 repos:
   - repo: https://github.com/commitizen-tools/commitizen
