@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class Certificate:
-    """A certificate, its key and the CA bundle."""
+    """A certificate, its key and the CA bundle, as PEM text."""
 
     crt: str
     key: str
@@ -19,6 +19,11 @@ class Certificate:
             parts.append(self.cab.strip())
         return "\n".join(parts) + "\n"
 
+    @property
+    def key_pem(self) -> str:
+        """Return the private key with a single trailing newline."""
+        return self.key.strip() + "\n"
+
 
 @dataclass(frozen=True, slots=True)
 class DynamicDnsRecord:
@@ -26,4 +31,4 @@ class DynamicDnsRecord:
 
     id: str
     domain: str
-    description: str | None
+    webcall_url: str

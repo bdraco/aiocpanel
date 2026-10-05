@@ -4,7 +4,6 @@ from typing import Any
 import aiohttp
 import pytest
 from aiointercept import aiointercept
-from yarl import URL
 
 from aiocpanel import (
     Certificate,
@@ -25,7 +24,11 @@ CREATE_URL = (
     "?description=Home+Assistant&domain=home.example.com"
 )
 RECORD_ID = "abcdefghijklmnopqrstuvwxyzabcdef"
-WEBCALL_URL = f"{BASE}/cpanelwebcall/{RECORD_ID}"
+RECORD = DynamicDnsRecord(
+    id=RECORD_ID,
+    domain="home.example.com",
+    webcall_url=f"{BASE}/cpanelwebcall/{RECORD_ID}",
+)
 
 
 def ok(data: object) -> dict[str, object]:
@@ -45,16 +48,21 @@ async def client(mock: aiointercept) -> AsyncIterator[CpanelClient]:
 
 
 async def test_fetch_certificate(client: CpanelClient, mock: aiointercept) -> None:
-    mock.get(FETCH_URL, payload=ok({"crt": "CRT\n", "key": "KEY", "cab": "CA\n"}))
+    mock.get(FETCH_URL, payload=ok({"crt": "CRT", "key": "KEY", "cab": "CA"}))
     cert = await client.fetch_certificate("home.example.com")
-    assert cert == Certificate(crt="CRT\n", key="KEY", cab="CA\n")
-    assert cert.fullchain == "CRT\nCA\n"
-    request = mock.requests[("GET", URL(FETCH_URL))][0]
-    assert request.kwargs["headers"]["Authorization"] == "cpanel user:token"
+    assert cert == Certificate(crt="CRT", key="KEY", cab="CA")
+    mock.assert_called_with(FETCH_URL, headers={"Authorization": "cpanel user:token"})
 
 
-def test_fullchain_without_bundle() -> None:
-    assert Certificate(crt="CRT", key="KEY", cab=None).fullchain == "CRT\n"
+@pytest.mark.parametrize(
+    ("cab", "fullchain"),
+    [("CA\n", "CRT\nCA\n"), (None, "CRT\n")],
+    ids=["with_bundle", "without_bundle"],
+)
+def test_certificate_pem(cab: str | None, fullchain: str) -> None:
+    cert = Certificate(crt="CRT\n", key=" KEY\n\n", cab=cab)
+    assert cert.fullchain == fullchain
+    assert cert.key_pem == "KEY\n"
 
 
 @pytest.mark.parametrize("data", [None, {"crt": "", "key": ""}], ids=["none", "empty"])
@@ -71,6 +79,7 @@ async def test_fetch_certificate_missing(
     [
         pytest.param({"status": 401}, CpanelAuthError, id="unauthorized"),
         pytest.param({"status": 403}, CpanelAuthError, id="forbidden"),
+        pytest.param({"status": 404}, CpanelApiError, id="not_found"),
         pytest.param({"status": 500}, CpanelConnectionError, id="server_error"),
         pytest.param({"exception": True}, CpanelConnectionError, id="unreachable"),
         pytest.param({"body": "<html>"}, CpanelApiError, id="not_json"),
@@ -99,48 +108,35 @@ async def test_errors(
 async def test_start_autossl_check(client: CpanelClient, mock: aiointercept) -> None:
     mock.get(AUTOSSL_URL, payload=ok(None))
     await client.start_autossl_check()
-    assert ("GET", URL(AUTOSSL_URL)) in mock.requests
+    mock.assert_any_call(AUTOSSL_URL)
 
 
-async def test_get_webcall_url_existing(
-    client: CpanelClient, mock: aiointercept
-) -> None:
-    mock.get(
-        LIST_URL,
-        payload=ok(
+@pytest.mark.parametrize(
+    ("records", "creates"),
+    [
+        pytest.param(
             [
                 {"id": "x" * 32, "domain": "other.example.com"},
                 {"id": RECORD_ID, "domain": "Home.Example.com", "description": "HA"},
-            ]
+            ],
+            False,
+            id="existing",
         ),
-    )
-    assert await client.get_webcall_url("home.example.com", "Home Assistant") == (
-        WEBCALL_URL
-    )
-    assert ("GET", URL(CREATE_URL)) not in mock.requests
-
-
-async def test_get_webcall_url_creates(
-    client: CpanelClient, mock: aiointercept
+        pytest.param([], True, id="missing"),
+    ],
+)
+async def test_ensure_dynamic_dns(
+    client: CpanelClient,
+    mock: aiointercept,
+    records: list[dict[str, str]],
+    creates: bool,
 ) -> None:
-    mock.get(LIST_URL, payload=ok([]))
+    mock.get(LIST_URL, payload=ok(records))
     mock.get(CREATE_URL, payload=ok({"id": RECORD_ID, "created_time": 1}))
-    assert await client.get_webcall_url("home.example.com", "Home Assistant") == (
-        WEBCALL_URL
-    )
-    assert ("GET", URL(CREATE_URL)) in mock.requests
-
-
-async def test_create_dynamic_dns_without_description(
-    client: CpanelClient, mock: aiointercept
-) -> None:
-    mock.get(
-        f"{BASE}/execute/DynamicDNS/create?domain=home.example.com",
-        payload=ok({"id": RECORD_ID}),
-    )
-    assert await client.create_dynamic_dns("home.example.com") == DynamicDnsRecord(
-        id=RECORD_ID, domain="home.example.com", description=None
-    )
+    record = await client.ensure_dynamic_dns("home.example.com", "Home Assistant")
+    assert record.id == RECORD_ID
+    assert record.webcall_url == RECORD.webcall_url
+    assert any(str(key[1]) == CREATE_URL for key in mock.requests) is creates
 
 
 async def test_list_dynamic_dns_empty(client: CpanelClient, mock: aiointercept) -> None:
@@ -149,5 +145,18 @@ async def test_list_dynamic_dns_empty(client: CpanelClient, mock: aiointercept) 
 
 
 async def test_call_webcall(client: CpanelClient, mock: aiointercept) -> None:
-    mock.get(WEBCALL_URL, body=" updated \n")
-    assert await client.call_webcall(WEBCALL_URL) == "updated"
+    mock.get(RECORD.webcall_url, body=" updated \n")
+    assert await client.call_webcall(RECORD) == "updated"
+
+
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [(403, CpanelApiError), (503, CpanelConnectionError)],
+    ids=["rejected", "unavailable"],
+)
+async def test_call_webcall_errors(
+    client: CpanelClient, mock: aiointercept, status: int, error: type[Exception]
+) -> None:
+    mock.get(RECORD.webcall_url, status=status)
+    with pytest.raises(error):
+        await client.call_webcall(RECORD)

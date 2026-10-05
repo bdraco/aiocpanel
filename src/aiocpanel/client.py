@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 import aiohttp
+from yarl import URL
 
 from .exceptions import (
     CpanelApiError,
@@ -28,31 +29,44 @@ class CpanelClient:
         token: str,
         port: int = DEFAULT_PORT,
     ) -> None:
-        """Initialize the client."""
         self._session = session
-        self._server_url = f"https://{host}:{port}"
+        self._server_url = URL.build(scheme="https", host=host, port=port)
         self._headers = {"Authorization": f"cpanel {username}:{token}"}
 
-    async def _get(self, url: str, **kwargs: Any) -> str:
-        """GET a URL and return the body."""
+    async def _get(
+        self,
+        url: URL | str,
+        params: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, str]:
+        """
+        GET a URL and return the status and body.
+
+        Server errors are raised as connection errors since they are usually
+        temporary; client errors are left to the caller.
+        """
         try:
             async with self._session.get(
-                url, timeout=REQUEST_TIMEOUT, **kwargs
+                url, params=params, headers=headers, timeout=REQUEST_TIMEOUT
             ) as resp:
-                if resp.status in (401, 403):
-                    raise CpanelAuthError(f"cPanel returned HTTP {resp.status}")
-                resp.raise_for_status()
-                return await resp.text()
+                status, body = resp.status, await resp.text()
         except (aiohttp.ClientError, TimeoutError) as err:
             raise CpanelConnectionError(str(err) or type(err).__name__) from err
+        if status >= 500:
+            raise CpanelConnectionError(f"cPanel returned HTTP {status}")
+        return status, body
 
-    async def uapi(self, module: str, function: str, **params: str) -> Any:
+    async def _uapi(self, module: str, function: str, **params: str) -> Any:
         """Call a UAPI function and return its data."""
-        body = await self._get(
-            f"{self._server_url}/execute/{module}/{function}",
+        status, body = await self._get(
+            self._server_url / "execute" / module / function,
             params=params,
             headers=self._headers,
         )
+        if status in (401, 403):
+            raise CpanelAuthError(f"cPanel returned HTTP {status}")
+        if status >= 400:
+            raise CpanelApiError(f"cPanel returned HTTP {status}")
         try:
             response = json.loads(body)
         except ValueError as err:
@@ -63,53 +77,57 @@ class CpanelClient:
             raise CpanelApiError("; ".join(response.get("errors") or ["unknown error"]))
         return response.get("data")
 
+    def _record(self, record_id: str, domain: str) -> DynamicDnsRecord:
+        return DynamicDnsRecord(
+            id=record_id,
+            domain=domain,
+            webcall_url=str(self._server_url / "cpanelwebcall" / record_id),
+        )
+
     async def fetch_certificate(self, domain: str) -> Certificate:
         """Return the best installed certificate for a domain."""
-        data = await self.uapi("SSL", "fetch_best_for_domain", domain=domain)
+        data = await self._uapi("SSL", "fetch_best_for_domain", domain=domain)
         if not data or not data.get("crt") or not data.get("key"):
             raise CpanelNoCertificateError(f"No certificate found for {domain}")
         return Certificate(crt=data["crt"], key=data["key"], cab=data.get("cab"))
 
     async def start_autossl_check(self) -> None:
         """Ask cPanel to run AutoSSL for the account."""
-        await self.uapi("SSL", "start_autossl_check")
+        await self._uapi("SSL", "start_autossl_check")
 
     async def list_dynamic_dns(self) -> list[DynamicDnsRecord]:
         """Return the account's Dynamic DNS records."""
         return [
-            DynamicDnsRecord(
-                id=record["id"],
-                domain=record["domain"],
-                description=record.get("description"),
-            )
-            for record in await self.uapi("DynamicDNS", "list") or []
+            self._record(record["id"], record["domain"])
+            for record in await self._uapi("DynamicDNS", "list") or []
         ]
 
     async def create_dynamic_dns(
-        self, domain: str, description: str | None = None
+        self, domain: str, description: str
     ) -> DynamicDnsRecord:
         """Create a Dynamic DNS record."""
-        params = {"domain": domain}
-        if description is not None:
-            params["description"] = description
-        data = await self.uapi("DynamicDNS", "create", **params)
-        return DynamicDnsRecord(id=data["id"], domain=domain, description=description)
-
-    async def get_webcall_url(self, domain: str, description: str | None = None) -> str:
-        """Return the webcall URL for a domain, creating its record if needed."""
-        domain = domain.lower()
-        record = next(
-            (r for r in await self.list_dynamic_dns() if r.domain.lower() == domain),
-            None,
+        data = await self._uapi(
+            "DynamicDNS", "create", domain=domain, description=description
         )
-        if record is None:
-            record = await self.create_dynamic_dns(domain, description)
-        return self.webcall_url(record)
+        return self._record(data["id"], domain)
 
-    def webcall_url(self, record: DynamicDnsRecord) -> str:
-        """Return the webcall URL for a record."""
-        return f"{self._server_url}/cpanelwebcall/{record.id}"
+    async def ensure_dynamic_dns(
+        self, domain: str, description: str
+    ) -> DynamicDnsRecord:
+        """Return the Dynamic DNS record for a domain, creating it if missing."""
+        domain = domain.lower()
+        for record in await self.list_dynamic_dns():
+            if record.domain.lower() == domain:
+                return record
+        return await self.create_dynamic_dns(domain, description)
 
-    async def call_webcall(self, url: str) -> str:
-        """Call a Dynamic DNS webcall so cPanel records the caller's public IP."""
-        return (await self._get(url)).strip()
+    async def call_webcall(self, record: DynamicDnsRecord) -> str:
+        """
+        Call a record's webcall so cPanel points it at the caller's public IP.
+
+        Returns the response text from cPanel.
+        """
+        status, body = await self._get(record.webcall_url)
+        if status >= 400:
+            raise CpanelApiError(f"cPanel returned HTTP {status}")
+        return body.strip()
