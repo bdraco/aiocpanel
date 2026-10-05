@@ -145,14 +145,14 @@ async def test_list_dynamic_dns_empty(client: CpanelClient, mock: aiointercept) 
 
 
 async def test_call_webcall(client: CpanelClient, mock: aiointercept) -> None:
-    mock.get(RECORD.webcall_url, body=" updated \n")
-    assert await client.call_webcall(RECORD) == "updated"
+    mock.get(RECORD.webcall_url, body="ipv4: 203.0.113.7\n")
+    assert await client.call_webcall(RECORD) == "ipv4: 203.0.113.7"
 
 
 @pytest.mark.parametrize(
     ("status", "error"),
-    [(403, CpanelApiError), (503, CpanelConnectionError)],
-    ids=["rejected", "unavailable"],
+    [(404, CpanelApiError), (503, CpanelConnectionError)],
+    ids=["unknown_record", "unavailable"],
 )
 async def test_call_webcall_errors(
     client: CpanelClient, mock: aiointercept, status: int, error: type[Exception]
