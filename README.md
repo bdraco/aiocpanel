@@ -46,6 +46,10 @@ Install this via pip (or your favourite package manager):
 
 `pip install aiocpanel`
 
+## Usage
+
+See the [usage docs](https://aiocpanel.readthedocs.io/en/latest/usage.html). It covers fetching a certificate, starting AutoSSL and keeping a Dynamic DNS record current, all with a cPanel API token.
+
 ## Contributors ✨
 
 Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
